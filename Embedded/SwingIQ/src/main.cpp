@@ -3,6 +3,8 @@
 #include <ArduinoBLE.h>
 #include <SPI.h>
 #include <SD.h>
+#include <queue>
+#include <cppQueue.h>
 
 #define SD_CS D6
 #define BUTTON_PIN D0
@@ -16,9 +18,23 @@ BLEService devService("A175281E-0080-49AD-8228-4332777DE600");
 BLEStringCharacteristic statusCharacteristic("A3AA43CC-E0FD-4E9E-81C0-DCF57D2D06FF", BLERead | BLENotify, 32); // 32 character string characteristic
 BLEByteCharacteristic useButtonCharacteristic("32D849DD-2626-43EA-AF67-4B175EC1D130", BLERead | BLEWrite);
 
+typedef struct imu_measurement{
+  int32_t time;
+  float ax;
+  float ay;
+  float az;
+  float gx;
+  float gy;
+  float gz;
+} imu_m_t;
+
+#define NB_ITEMS 4096
+imu_m_t			q_dat[NB_ITEMS];
+cppQueue	q(sizeof(imu_m_t), NB_ITEMS, FIFO, false, q_dat, sizeof(q_dat));	// Instantiate queue with static queue data arguments
+
 #define COUNT_BUF_SIZE 64
 int count = 0;
-std::string base_filename = "/sample%d.csv";
+std::string base_filename = "/s%d.csv";
 char filename[COUNT_BUF_SIZE] = {0};
 
 void connectHandler(BLEDevice central) {
@@ -62,15 +78,14 @@ void connectHandler(BLEDevice central) {
 void setup(void) {
 
     Serial.begin(115200);
-    while (!Serial)
-      delay(10);
-
+    
     pinMode(BUTTON_PIN, INPUT);
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
 
     if (!BLE.begin()) {
         Serial.println("starting BLE failed");
+        digitalWrite(LED_PIN, HIGH);
         while (true);
     }
     BLE.setLocalName(bleName);
@@ -120,7 +135,7 @@ void setup(void) {
     BLE.poll();
 
     lsm_accel = lsm6ds.getAccelerometerSensor();
-    lsm6ds.setAccelDataRate(LSM6DS_RATE_416_HZ);
+    lsm6ds.setAccelDataRate(  LSM6DS_RATE_416_HZ);
     lsm6ds.setAccelRange(LSM6DS_ACCEL_RANGE_16_G);
     lsm_accel->printSensorDetails();
     float accel_sample_rate = lsm6ds.accelerationSampleRate();
@@ -133,8 +148,6 @@ void setup(void) {
     float gyro_sample_rate = lsm6ds.gyroscopeSampleRate();
     Serial.print("Sample Rate: ");
     Serial.println(gyro_sample_rate);
-
-    lsm_temp = lsm6ds.getTemperatureSensor();
 
     Serial.println("Closing Serial");
     Serial.end();
@@ -156,6 +169,7 @@ void setup(void) {
         count++;
         entry.close();
     }
+    count = 100;
 }
 
 void loop(void){
@@ -173,23 +187,41 @@ void loop(void){
         BLE.poll();
         snprintf(filename, COUNT_BUF_SIZE, base_filename.c_str(), count);
         File measurement_file = SD.open(filename, FILE_WRITE);
-        measurement_file.println("time (ms),Ax (m/s^2),Ay,Az,Gx (rads/s),Gy,Gz,temperature (C)");
+        measurement_file.println("time (ms),Ax (m/s^2),Ay,Az,Gx (rads/s),Gy,Gz");
         statusCharacteristic.setValue(filename);
         BLE.poll();
         digitalWrite(LED_PIN, HIGH);
+        imu_m_t temp;
         while(!digitalRead(BUTTON_PIN)){
             sensors_event_t accel;
             sensors_event_t gyro;
-            sensors_event_t temp;
-            lsm6ds.getEvent(&accel, &gyro, &temp);
-            measurement_file.print(millis()); 
-            measurement_file.print(","); measurement_file.print(accel.acceleration.x);
-            measurement_file.print(","); measurement_file.print(accel.acceleration.y);
-            measurement_file.print(","); measurement_file.print(accel.acceleration.z);
-            measurement_file.print(","); measurement_file.print(gyro.gyro.x);
-            measurement_file.print(","); measurement_file.print(gyro.gyro.y);
-            measurement_file.print(","); measurement_file.print(gyro.gyro.z);
-            measurement_file.println();
+            while(!(lsm6ds.accelerationGyroscopeAvailable()));
+            lsm6ds.getEvent(&accel, &gyro, nullptr);
+            imu_m_t measurement = {.time = accel.timestamp, .ax=accel.acceleration.x, .ay=accel.acceleration.z, .az=accel.acceleration.z, .gx=gyro.gyro.x, .gy=gyro.gyro.y, .gz=gyro.gyro.z};
+            if(!q.push(&measurement)){
+              for(int i = 0; i < 12; i++){
+                q.pop(&temp);
+                measurement_file.print(temp.time); 
+                measurement_file.print(","); measurement_file.print(temp.ax);
+                measurement_file.print(","); measurement_file.print(temp.ay);
+                measurement_file.print(","); measurement_file.print(temp.az);
+                measurement_file.print(","); measurement_file.print(temp.gx);
+                measurement_file.print(","); measurement_file.print(temp.gy);
+                measurement_file.print(","); measurement_file.print(temp.gz);
+                measurement_file.println();
+              }
+              q.push(&measurement);
+            }
+        }
+        while(q.pop(&temp)){
+          measurement_file.print(temp.time); 
+          measurement_file.print(","); measurement_file.print(temp.ax);
+          measurement_file.print(","); measurement_file.print(temp.ay);
+          measurement_file.print(","); measurement_file.print(temp.az);
+          measurement_file.print(","); measurement_file.print(temp.gx);
+          measurement_file.print(","); measurement_file.print(temp.gy);
+          measurement_file.print(","); measurement_file.print(temp.gz);
+          measurement_file.println();
         }
         measurement_file.close();
         count++;
